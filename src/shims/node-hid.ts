@@ -154,6 +154,41 @@ const ExtendedHID = {
 
     readP = promisify((arg: any) => this.read(arg));
 
+    readWithTimeout(timeoutMs: number): Promise<Uint8Array | null> {
+      return new Promise((resolve) => {
+        let settled = false;
+
+        const cb = (data: Uint8Array) => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timeoutId);
+            resolve(data);
+          }
+        };
+
+        const timeoutId = setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            // Remove our callback from eventWaitBuffer to prevent it from consuming future responses
+            const idx = eventWaitBuffer[this.path].indexOf(cb);
+            if (idx !== -1) {
+              eventWaitBuffer[this.path].splice(idx, 1);
+            }
+            resolve(null); // null indicates timeout
+          }
+        }, timeoutMs);
+
+        this.fastForwardGlobalBuffer(Date.now());
+        if (globalBuffer[this.path].length > 0) {
+          settled = true;
+          clearTimeout(timeoutId);
+          resolve(globalBuffer[this.path].shift()?.message as Uint8Array);
+        } else {
+          eventWaitBuffer[this.path].push(cb);
+        }
+      });
+    }
+
     // The idea is discard any messages that have happened before the time a command was issued
     // since time-travel is not possible yet...
     fastForwardGlobalBuffer(time: number) {
@@ -173,6 +208,11 @@ const ExtendedHID = {
       await this.openPromise;
       const data = new Uint8Array(arr.slice(1));
       await this._hidDevice?._device.sendReport(0, data);
+    }
+
+    clearBuffer() {
+      globalBuffer[this.path] = [];
+      eventWaitBuffer[this.path] = [];
     }
   },
 };

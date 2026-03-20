@@ -642,6 +642,10 @@ export class KeyboardAPI {
     return cache[this.kbAddr].hid;
   }
 
+  flush() {
+    this.getHID().clearBuffer();
+  }
+
   async _hidCommand(command: Command, bytes: Array<number> = []): Promise<any> {
     const commandBytes = [...[COMMAND_START, command], ...bytes];
     const paddedArray = new Array(33).fill(0);
@@ -649,38 +653,47 @@ export class KeyboardAPI {
       paddedArray[idx] = val;
     });
 
-    await this.getHID().write(paddedArray);
+    const MAX_RESEND_ATTEMPTS = 3;
+    for (let attempt = 0; attempt <= MAX_RESEND_ATTEMPTS; attempt++) {
+      await this.getHID().write(paddedArray);
 
-    const buffer = Array.from(await this.getByteBuffer());
-    const bufferCommandBytes = buffer.slice(0, commandBytes.length - 1);
-    logCommand(this.kbAddr, commandBytes, buffer);
-    if (!eqArr(commandBytes.slice(1), bufferCommandBytes)) {
-      console.error(
-        `Command for ${this.kbAddr}:`,
-        commandBytes,
-        'Bad Resp:',
-        buffer,
-      );
+      const rawBuffer = await this.getHID().readWithTimeout(2000);
+      if (rawBuffer === null) {
+        throw new Error('HID Read Timeout');
+      }
+      const buffer: number[] = Array.from(rawBuffer);
+      const bufferCommandBytes = buffer.slice(0, commandBytes.length - 1);
+      logCommand(this.kbAddr, commandBytes, buffer);
 
-      const deviceInfo = extractDeviceInfo(this.getHID());
-      const commandName = APICommandValueToName[command];
-      store.dispatch(
-        logKeyboardAPIError({
-          commandName,
-          commandBytes: commandBytes.slice(1),
-          responseBytes: buffer,
-          deviceInfo,
-        }),
-      );
+      if (eqArr(commandBytes.slice(1), bufferCommandBytes)) {
+        console.debug(
+          `Command for ${this.kbAddr}`,
+          commandBytes,
+          attempt > 0 ? `Correct Resp (after ${attempt} nudge(s)):` : 'Correct Resp:',
+          buffer,
+        );
+        return buffer;
+      }
 
-      throw new Error('Receiving incorrect response for command');
+      if (attempt < MAX_RESEND_ATTEMPTS) {
+        console.warn(
+          `Command for ${this.kbAddr}: Mismatched response, re-sending command to nudge keyboard (attempt ${attempt + 1}/${MAX_RESEND_ATTEMPTS})`,
+          {expected: commandBytes.slice(1), received: bufferCommandBytes},
+        );
+      }
     }
-    console.debug(
-      `Command for ${this.kbAddr}`,
-      commandBytes,
-      'Correct Resp:',
-      buffer,
+
+    const deviceInfo = extractDeviceInfo(this.getHID());
+    const commandName = APICommandValueToName[command];
+    store.dispatch(
+      logKeyboardAPIError({
+        commandName,
+        commandBytes: commandBytes.slice(1),
+        responseBytes: [],
+        deviceInfo,
+      }),
     );
-    return buffer;
+
+    throw new Error('Receiving incorrect response for command');
   }
 }
